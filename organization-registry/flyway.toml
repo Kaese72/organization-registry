@@ -1,0 +1,27 @@
+databaseType = "MariaDb"
+name = "organization-registry"
+id = "39dc279a-8ed3-4b1f-8923-290843d8e907"
+
+[flywayDesktop]
+developmentEnvironment = "development"
+shadowEnvironment = "shadow"
+schemaModel = "./schema-model"
+
+[redgateCompare]
+filterFile = "filter.rgf"
+
+[redgateCompare.mysql.options.ignores]
+ignoreNewlinesInTextObjects = "off"
+
+[flyway]
+mixed = true
+outOfOrder = true
+locations = [ "filesystem:migrations" ]
+validateMigrationNaming = true
+
+  [flyway.check]
+  majorTolerance = 0
+
+[environments.target1]
+url = "jdbc:mysql://localhost"
+schemas = [ "organizationregistry" ]
