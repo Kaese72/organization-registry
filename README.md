@@ -17,3 +17,9 @@ A MariaDB server is required. Configure via environment variables, the only requ
 
 The migrations are currently handled handled outside of the service, meaning that the Flyway
 migrations needs to be run by another mechanism.
+
+So far I have run the migrations like so
+
+> podman  run --rm -v migrations:/flyway/sql flyway/flyway '-url=jdbc:mariadb://#IP#:#PORT#/organizationregistry?user=#user#&password=#password#' migrate
+
+Not run automatically or anything. Its all manual
