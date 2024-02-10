@@ -1,14 +1,17 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/georgysavva/scany/v2/sqlscan"
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/gorilla/mux"
@@ -19,14 +22,72 @@ type Organization struct {
 	ID            	int    `json:"id"`
 }
 
-type User struct {
-	ID            	int    `json:"id"`
-	OrganizationID 	int    `json:"organization"`
-	Admin		  	bool   `json:"admin"`
+type contextKey string
+
+const (
+	userIDKey         contextKey = "userID"
+	organizationIDKey contextKey = "organizationID"
+)
+
+func (app application)authMiddleware(next http.Handler) http.Handler {
+    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        tokenString := r.Header.Get("Authorization")
+        if tokenString == "" {
+            w.WriteHeader(http.StatusUnauthorized)
+            return
+        }
+
+        tokenString = strings.Replace(tokenString, "Bearer ", "", 1)
+
+        token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
+            if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+                return nil, fmt.Errorf("unexpected signing method")
+            }
+            return []byte(app.jwtSecret), nil
+        })
+
+        if err != nil {
+            w.WriteHeader(http.StatusUnauthorized)
+            return
+        }
+
+        if !token.Valid {
+            w.WriteHeader(http.StatusUnauthorized)
+            return
+        }
+
+        claims, ok := token.Claims.(jwt.MapClaims)
+        if !ok {
+            w.WriteHeader(http.StatusUnauthorized)
+            return
+        }
+
+		userID, ok := claims[string(userIDKey)].(float64)
+		if !ok {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		organizationID, ok := claims[string(organizationIDKey)].(float64)
+		if !ok {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+
+		ctx := context.WithValue(r.Context(), userIDKey, userID)
+		ctx = context.WithValue(ctx, organizationIDKey, organizationID)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
 }
 
-type UserSecret struct {
+
+type User struct {
+	ID            	int    `json:"id"`
+	Organization 	int    `json:"organization"`
 	Username	  	string `json:"username"`
+}
+
+// UserSecret is a User but with secret fields
+type UserSecret struct {
 	Password	  	string `json:"password"`
 	User
 }
@@ -36,19 +97,34 @@ type application struct {
 	jwtSecret string
 }
 
-func (app application)attemptLogin(username string, password string) (User, error) {
+func (app application)attemptLogin(ctx context.Context, username string, password string) (User, error) {
 	var user User
-	err := app.db.QueryRow("SELECT id, organization, admin FROM users WHERE username = ? AND password = ?", username, password).Scan(&user.ID, &user.OrganizationID, &user.Admin)
+	err := app.db.QueryRowContext(ctx, "SELECT id, organization FROM users WHERE username = ? AND password = ?", username, password).Scan(&user.ID, &user.Organization)
 	return user, err
 }
+
+// func (app application)updatePassword(ctx context.Context, id int, password string) (User, error) {
+// 	var user User
+// 	result, err := app.db.ExecContext(ctx, "UPDATE users SET password = ? WHERE id = ?", password, id)
+// 	if err != nil {
+// 		return user, err
+// 	}
+// 	affected, err := result.RowsAffected()
+// 	if err != nil {
+// 		return user, err
+// 	}
+// 	if affected == 0 {
+// 		return user, fmt.Errorf("user not found")
+// 	}
+// 	return user, err
+// }
 
 func (app application)createToken(user User) (string, error) {
 
 	// Create a new JWT token
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
 		"userID": user.ID,
-		"organizationID": user.OrganizationID,
-		"admin":  user.Admin,
+		"organizationID": user.Organization,
 		"exp":   time.Now().Add(time.Hour).Unix(),
 	})
 
@@ -60,6 +136,106 @@ func (app application)createToken(user User) (string, error) {
 
 	return tokenString, nil
 }
+
+func DBReadUsers(db *sql.DB, organization int) ([]User, error) {
+	users := []User{}
+	err := sqlscan.Select(context.TODO(), db, &users, `SELECT id,organization,username FROM users where organization = ?`, organization)
+	return users, err
+}
+
+func DBReadUser(db *sql.DB, organization int, id int) (User, error) {
+	users := []User{}
+	err := sqlscan.Select(context.TODO(), db, &users, `SELECT id,organization,username FROM users WHERE organization = ? AND id = ?`, organization, id)
+	if len(users) == 0 {
+		return User{}, fmt.Errorf("user not found")
+	}
+	return users[0], err
+}
+
+func DBCreateUser(db *sql.DB, user UserSecret) (User, error) {
+	resUsers := []User{}
+	result, err := db.Query(`INSERT INTO users (organization, username, password) VALUES (?, ?, ?) RETURNING id,organization,username`, user.Organization, user.Username, user.Password)
+	if err != nil {
+		return User{}, err
+	}
+	err = sqlscan.ScanAll(&resUsers, result)
+	if err != nil {
+		return User{}, err
+	}
+	if len(resUsers) == 0 {
+		return User{}, fmt.Errorf("user not created")
+	}
+	return resUsers[0], err
+}
+
+func DBUpdateUser(db *sql.DB, user User, userId int, organizationId int) (User, error) {
+	resUsers := []User{}
+	sqlString := ""
+	arguments := []interface{}{}
+	for _, u := range resUsers {
+		if u.Organization != user.Organization {
+			sqlString += "organization = ?,"
+			arguments = append(arguments, user.Organization)
+		}
+		if u.Username != user.Username {
+			sqlString += "username = ?,"
+			arguments = append(arguments, user.Username)
+		}
+	}
+	// These are used to prevent updating of other organizations users
+	sqlString += " WHERE id = ? AND organization = ?"
+	arguments = append(arguments, userId)
+	arguments = append(arguments, organizationId)
+	result, err := db.Query(fmt.Sprintf(`UPDATE users SET %s RETURNING id,organization,username`, sqlString), arguments...)
+	if err != nil {
+		return User{}, err
+	}
+	err = sqlscan.ScanAll(&resUsers, result)
+	if err != nil {
+		return User{}, err
+	}
+	if len(resUsers) == 0 {
+		return User{}, fmt.Errorf("user not updated")
+	}
+	return resUsers[0], err
+}
+
+func DBRegisterOrganization(db *sql.DB, username string, password string) (Organization, User, error) {
+	resOrgs := []Organization{}
+	resUsers := []User{}
+	tx, err := db.BeginTx(context.Background(), nil)
+	if err != nil {
+		return Organization{}, User{}, err
+	}
+	result, err := tx.Query(`INSERT INTO organizations () VALUES () RETURNING id`)
+	if err != nil {
+		return Organization{}, User{}, err
+	}
+	err = sqlscan.ScanAll(&resOrgs, result)
+	if err != nil {
+		return Organization{}, User{}, err
+	}
+	if len(resOrgs) == 0 {
+		return Organization{}, User{}, fmt.Errorf("organization not created")
+	}
+	result, err = tx.Query(`INSERT INTO users (organization, username, password) VALUES (?, ?, ?) RETURNING id, organization,username`, resOrgs[0].ID, username, password)
+	if err != nil {
+		return Organization{}, User{}, err
+	}
+	err = sqlscan.ScanAll(&resUsers, result)
+	if err != nil {
+		return Organization{}, User{}, err
+	}
+	if len(resUsers) == 0 {
+		return Organization{}, User{}, fmt.Errorf("user not created")
+	}
+	err = tx.Commit()
+	if err != nil {
+		return Organization{}, User{}, err
+	}
+	return resOrgs[0], resUsers[0], err
+}
+
 
 func APIError(w http.ResponseWriter, message string, code int) {
 	response := struct {
@@ -82,22 +258,23 @@ func APIError(w http.ResponseWriter, message string, code int) {
 
 
 func (app application) login(w http.ResponseWriter, r *http.Request) {
-	err := r.ParseForm()
+	ctx := r.Context()
+	input := struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}{}
+	err := json.NewDecoder(r.Body).Decode(&input)
 	if err != nil {
-		APIError(w, "Failed to parse form data", http.StatusBadRequest)
+		APIError(w, "Failed to parse JSON body", http.StatusBadRequest)
 		return
 	}
-
-	username := r.Form.Get("username")
-	password := r.Form.Get("password")
-
-	if username == "" || password == "" {
+	if input.Username == "" || input.Password == "" {
 		APIError(w, "Username or password missing in webform", http.StatusBadRequest)
 		return
 	}
 
 
-	loggedInUser, err := app.attemptLogin(username, password)
+	loggedInUser, err := app.attemptLogin(ctx, input.Username, input.Password)
 	if err != nil {	
 		APIError(w, "Failed to login", http.StatusUnauthorized)
 		return
@@ -106,6 +283,7 @@ func (app application) login(w http.ResponseWriter, r *http.Request) {
 	// Create JWT token
 	token, err := app.createToken(loggedInUser)
 	if err != nil {
+		log.Print(err.Error())
 		APIError(w, "Failed to create JWT token", http.StatusInternalServerError)
 		return
 	}
@@ -121,13 +299,163 @@ func (app application) login(w http.ResponseWriter, r *http.Request) {
 
 	jsonResponse, err := json.MarshalIndent(response, "", "   ")
 	if err != nil {
+		log.Print(err.Error())
 		APIError(w, "Failed to marshal JSON response", http.StatusInternalServerError)
 		return
 	}
-
+	cookie := &http.Cookie{
+		Name:     "organizationLoginToken",
+		Value:    token,
+		HttpOnly: true,
+	}
+	http.SetCookie(w, cookie)
 	w.Header().Set("Content-Type", "application/json")
 	w.Write(jsonResponse)
 }
+
+func (app application) readUser(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	userID := vars["id"]
+	if userID == "" {
+		APIError(w, "userID missing", http.StatusBadRequest)
+		return
+	}
+	userIdInt, err := strconv.Atoi(userID)
+	if err != nil {
+		APIError(w, "userID is not a number", http.StatusBadRequest)
+		return
+	}
+	organizationID := r.Context().Value(organizationIDKey).(float64)
+	user, err := DBReadUser(app.db, int(organizationID), userIdInt)
+	if err != nil {
+		log.Print(err.Error())
+		APIError(w, "Failed to read user", http.StatusInternalServerError)
+		return
+	}
+	jsonResponse, err := json.MarshalIndent(user, "", "   ")
+	if err != nil {
+		log.Print(err.Error())
+		APIError(w, "Failed to marshal JSON response", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(jsonResponse)
+}
+
+func (app application) readUsers(w http.ResponseWriter, r *http.Request) {
+	organizationID := r.Context().Value(organizationIDKey).(float64)
+	users, err := DBReadUsers(app.db, int(organizationID))
+	if err != nil {
+		log.Print(err.Error())
+		APIError(w, "Failed to read users", http.StatusInternalServerError)
+		return
+	}
+	jsonResponse, err := json.MarshalIndent(users, "", "   ")
+	if err != nil {
+		log.Print(err.Error())
+		APIError(w, "Failed to marshal JSON response", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(jsonResponse)
+}
+
+func (app application) registerOrganization(w http.ResponseWriter, r *http.Request) {
+	input := struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}{}
+	err := json.NewDecoder(r.Body).Decode(&input)
+	if err != nil {
+		log.Print(err.Error())
+		APIError(w, "Failed to parse JSON body", http.StatusBadRequest)
+		return
+	}
+	organization, user, err := DBRegisterOrganization(app.db, input.Username, input.Password)
+	if err != nil {
+		log.Print(err.Error())
+		APIError(w, "Failed to register organization", http.StatusInternalServerError)
+		return
+	}
+	response := struct {
+		Organization Organization `json:"organization"`
+		User User `json:"user"`
+	}{	Organization: organization, User: user}
+	jsonResponse, err := json.MarshalIndent(response, "", "   ")
+	if err != nil {
+		log.Print(err.Error())
+		APIError(w, "Failed to marshal JSON response", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(jsonResponse)
+}
+
+func (app application) createUser(w http.ResponseWriter, r *http.Request) {
+	organizationID := r.Context().Value(organizationIDKey).(float64)
+	inputUser := UserSecret{}
+	err := json.NewDecoder(r.Body).Decode(&inputUser)
+	if err != nil {
+		log.Print(err.Error())
+		APIError(w, "Failed to parse JSON body", http.StatusBadRequest)
+		return
+	}
+	// Always set the organization to the current user's organization
+	inputUser.Organization = int(organizationID)
+	user, err := DBCreateUser(app.db, inputUser)
+	if err != nil {
+		log.Print(err.Error())
+		APIError(w, "Failed to create user", http.StatusInternalServerError)
+		return
+	}
+	jsonResponse, err := json.MarshalIndent(user, "", "   ")
+	if err != nil {
+		log.Print(err.Error())
+		APIError(w, "Failed to marshal JSON response", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(jsonResponse)
+}
+
+func (app application) updateUser(w http.ResponseWriter, r *http.Request) {
+	organizationID := r.Context().Value(organizationIDKey).(float64)
+	vars := mux.Vars(r)
+	userID := vars["id"]
+	if userID == "" {
+		APIError(w, "userID missing", http.StatusBadRequest)
+		return
+	}
+	userIdInt, err := strconv.Atoi(userID)
+	if err != nil {
+		APIError(w, "userID is not a number", http.StatusBadRequest)
+		return
+	}
+	inputUser := User{}
+	err = json.NewDecoder(r.Body).Decode(&inputUser)
+	if err != nil {
+		log.Print(err.Error())
+		APIError(w, "Failed to parse JSON body", http.StatusBadRequest)
+		return
+	}
+	// Always set the organization to the current user's organization
+	inputUser.Organization = int(organizationID)
+	user, err := DBUpdateUser(app.db, inputUser, userIdInt, int(organizationID))
+	if err != nil {
+		log.Print(err.Error())
+		APIError(w, "Failed to update user", http.StatusInternalServerError)
+		return
+	}
+	jsonResponse, err := json.MarshalIndent(user, "", "   ")
+	if err != nil {
+		log.Print(err.Error())
+		APIError(w, "Failed to marshal JSON response", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(jsonResponse)
+}
+
 
 type Config struct {
 	Database struct {
@@ -201,8 +529,19 @@ func main() {
 	
 	app := application{db: db, jwtSecret: Loaded.JWT.Secret}
 	router := mux.NewRouter()
+	// Unauthenticated routes
+	unauthenticatedRouter := router.PathPrefix("").Subrouter()
+	unauthenticatedRouter.HandleFunc("/auth/login", app.login).Methods("POST")
+	unauthenticatedRouter.HandleFunc("/organizations/register", app.registerOrganization).Methods("POST")
 
-	router.HandleFunc("/organizations/user/login", app.login).Methods("POST")
+	// Authenticated required
+	authenticatedRouter := router.NewRoute().Subrouter()
+	authenticatedRouter.Use(app.authMiddleware)
+	// authenticatedRouter.HandleFunc("/users/changemypw", app.changeMyPassword).Methods("POST")
+	authenticatedRouter.HandleFunc("/users/{id:[0-9]+}", app.readUser).Methods("GET")
+	authenticatedRouter.HandleFunc("/users", app.readUsers).Methods("GET")
+	authenticatedRouter.HandleFunc("/users", app.createUser).Methods("POST")
+	authenticatedRouter.HandleFunc("/user/{id:[0-9]+}", app.updateUser).Methods("POST")
+
 	log.Fatal(http.ListenAndServe(fmt.Sprintf("%s:%d", Loaded.Listen.Host, Loaded.Listen.Port), router))
 }
-
