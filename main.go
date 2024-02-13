@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -19,7 +20,7 @@ import (
 )
 
 type Organization struct {
-	ID            	int    `json:"id"`
+	ID int `json:"id"`
 }
 
 type contextKey string
@@ -29,75 +30,78 @@ const (
 	organizationIDKey contextKey = "organizationID"
 )
 
-func (app application)authMiddleware(next http.Handler) http.Handler {
-    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-        tokenString := r.Header.Get("Authorization")
-        if tokenString == "" {
-            w.WriteHeader(http.StatusUnauthorized)
-            return
-        }
-
-        tokenString = strings.Replace(tokenString, "Bearer ", "", 1)
-
-        token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
-            if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-                return nil, fmt.Errorf("unexpected signing method")
-            }
-            return []byte(app.jwtSecret), nil
-        })
-
-        if err != nil {
-            w.WriteHeader(http.StatusUnauthorized)
-            return
-        }
-
-        if !token.Valid {
-            w.WriteHeader(http.StatusUnauthorized)
-            return
-        }
-
-        claims, ok := token.Claims.(jwt.MapClaims)
-        if !ok {
-            w.WriteHeader(http.StatusUnauthorized)
-            return
-        }
-
-		userID, ok := claims[string(userIDKey)].(float64)
-		if !ok {
-			w.WriteHeader(http.StatusUnauthorized)
-			return
+func (app application) authenticateToken(tokenString string) (int, int, error) {
+	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
+		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, fmt.Errorf("unexpected signing method")
 		}
-		organizationID, ok := claims[string(organizationIDKey)].(float64)
-		if !ok {
+		return []byte(app.jwtSecret), nil
+	})
+
+	if err != nil {
+		return 0, 0, errors.New("error token")
+	}
+
+	if !token.Valid {
+		return 0, 0, errors.New("invalid token")
+	}
+
+	claims, ok := token.Claims.(jwt.MapClaims)
+	if !ok {
+		return 0, 0, errors.New("invalid claims")
+	}
+
+	userID, ok := claims[string(userIDKey)].(float64)
+	if !ok {
+		return 0, 0, errors.New("invalid user id")
+	}
+	organizationID, ok := claims[string(organizationIDKey)].(float64)
+	if !ok {
+		return 0, 0, errors.New("invalid organization id")
+	}
+	return int(userID), int(organizationID), nil
+}
+
+func (app application) authMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		tokenString := r.Header.Get("Authorization")
+		if tokenString == "" {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
 
-		ctx := context.WithValue(r.Context(), userIDKey, userID)
-		ctx = context.WithValue(ctx, organizationIDKey, organizationID)
+		tokenString = strings.Replace(tokenString, "Bearer ", "", 1)
+		userId, organizationId, err := app.authenticateToken(tokenString)
+		if err != nil {
+			// FIXME should to be able to differentiate between invalid token and expired token
+			log.Print(err.Error())
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		ctx := context.WithValue(r.Context(), userIDKey, userId)
+		ctx = context.WithValue(ctx, organizationIDKey, organizationId)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 
-
 type User struct {
-	ID            	int    `json:"id"`
-	Organization 	int    `json:"organization"`
-	Username	  	string `json:"username"`
+	ID           int    `json:"id"`
+	Organization int    `json:"organization"`
+	Username     string `json:"username"`
 }
 
 // UserSecret is a User but with secret fields
 type UserSecret struct {
-	Password	  	string `json:"password"`
+	Password string `json:"password"`
 	User
 }
 
 type application struct {
-	db *sql.DB
+	db        *sql.DB
 	jwtSecret string
 }
 
-func (app application)attemptLogin(ctx context.Context, username string, password string) (User, error) {
+func (app application) attemptLogin(ctx context.Context, username string, password string) (User, error) {
 	var user User
 	err := app.db.QueryRowContext(ctx, "SELECT id, organization FROM users WHERE username = ? AND password = ?", username, password).Scan(&user.ID, &user.Organization)
 	return user, err
@@ -119,13 +123,12 @@ func (app application)attemptLogin(ctx context.Context, username string, passwor
 // 	return user, err
 // }
 
-func (app application)createToken(user User) (string, error) {
-
+func (app application) createToken(user User) (string, error) {
 	// Create a new JWT token
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
-		"userID": user.ID,
+		"userID":         user.ID,
 		"organizationID": user.Organization,
-		"exp":   time.Now().Add(time.Hour).Unix(),
+		"exp":            time.Now().Add(time.Hour).Unix(),
 	})
 
 	// Sign the token with a secret key
@@ -236,7 +239,6 @@ func DBRegisterOrganization(db *sql.DB, username string, password string) (Organ
 	return resOrgs[0], resUsers[0], err
 }
 
-
 func APIError(w http.ResponseWriter, message string, code int) {
 	response := struct {
 		Message string `json:"message"`
@@ -256,28 +258,46 @@ func APIError(w http.ResponseWriter, message string, code int) {
 	w.Write([]byte("\n"))
 }
 
-
 func (app application) login(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	input := struct {
-		Username string `json:"username"`
-		Password string `json:"password"`
-	}{}
-	err := json.NewDecoder(r.Body).Decode(&input)
-	if err != nil {
-		APIError(w, "Failed to parse JSON body", http.StatusBadRequest)
-		return
-	}
-	if input.Username == "" || input.Password == "" {
-		APIError(w, "Username or password missing in webform", http.StatusBadRequest)
-		return
+	cookie, err := r.Cookie("organizationLoginToken")
+	var loggedInUser User
+	if err == nil {
+		userId, organizationId, err := app.authenticateToken(cookie.Value)
+		if err != nil {
+			log.Print(err.Error())
+			// Proceeding anyway with other authentication methods
+		} else {
+			// Token is valid, proceed with the user
+			loggedInUser, err = DBReadUser(app.db, organizationId, userId)
+			if err != nil {
+				// We pretty much ignore this issue and proceed with the other authentication methods
+				log.Print(err.Error())
+			}
+		}
 	}
 
+	if loggedInUser.ID == 0 {
+		// Logged in is not set, thus we need to try to authenticate
+		ctx := r.Context()
+		input := struct {
+			Username string `json:"username"`
+			Password string `json:"password"`
+		}{}
+		err = json.NewDecoder(r.Body).Decode(&input)
+		if err != nil {
+			APIError(w, "Failed to parse JSON body", http.StatusBadRequest)
+			return
+		}
+		if input.Username == "" || input.Password == "" {
+			APIError(w, "Username or password missing in webform", http.StatusBadRequest)
+			return
+		}
 
-	loggedInUser, err := app.attemptLogin(ctx, input.Username, input.Password)
-	if err != nil {	
-		APIError(w, "Failed to login", http.StatusUnauthorized)
-		return
+		loggedInUser, err = app.attemptLogin(ctx, input.Username, input.Password)
+		if err != nil {
+			APIError(w, "Failed to login", http.StatusUnauthorized)
+			return
+		}
 	}
 
 	// Create JWT token
@@ -291,10 +311,10 @@ func (app application) login(w http.ResponseWriter, r *http.Request) {
 	// Example response
 	response := struct {
 		Message string `json:"message"`
-		Token string `json:"token"`
+		Token   string `json:"token"`
 	}{
 		Message: "Login successful",
-		Token: token,
+		Token:   token,
 	}
 
 	jsonResponse, err := json.MarshalIndent(response, "", "   ")
@@ -303,7 +323,7 @@ func (app application) login(w http.ResponseWriter, r *http.Request) {
 		APIError(w, "Failed to marshal JSON response", http.StatusInternalServerError)
 		return
 	}
-	cookie := &http.Cookie{
+	cookie = &http.Cookie{
 		Name:     "organizationLoginToken",
 		Value:    token,
 		HttpOnly: true,
@@ -379,8 +399,8 @@ func (app application) registerOrganization(w http.ResponseWriter, r *http.Reque
 	}
 	response := struct {
 		Organization Organization `json:"organization"`
-		User User `json:"user"`
-	}{	Organization: organization, User: user}
+		User         User         `json:"user"`
+	}{Organization: organization, User: user}
 	jsonResponse, err := json.MarshalIndent(response, "", "   ")
 	if err != nil {
 		log.Print(err.Error())
@@ -456,7 +476,6 @@ func (app application) updateUser(w http.ResponseWriter, r *http.Request) {
 	w.Write(jsonResponse)
 }
 
-
 type Config struct {
 	Database struct {
 		Host     string `mapstructure:"host"`
@@ -518,15 +537,13 @@ func init() {
 	}
 }
 
-
 func main() {
 	db, err := sql.Open("mysql", fmt.Sprintf("%s:%s@tcp(%s:%d)/%s", Loaded.Database.User, Loaded.Database.Password, Loaded.Database.Host, Loaded.Database.Port, Loaded.Database.Database))
-    if err != nil {
-        log.Fatal(err)
-    }
-    defer db.Close()
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer db.Close()
 
-	
 	app := application{db: db, jwtSecret: Loaded.JWT.Secret}
 	router := mux.NewRouter()
 	// Unauthenticated routes
