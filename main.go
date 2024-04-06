@@ -545,7 +545,8 @@ func main() {
 	defer db.Close()
 
 	app := application{db: db, jwtSecret: Loaded.JWT.Secret}
-	router := mux.NewRouter()
+	// organization-registry is the prefix for all routes for this API
+	router := mux.NewRouter().PathPrefix("organization-registry").Subrouter()
 	// Unauthenticated routes
 	unauthenticatedRouter := router.PathPrefix("").Subrouter()
 	unauthenticatedRouter.HandleFunc("/auth/login", app.login).Methods("POST")
