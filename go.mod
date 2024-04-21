@@ -10,7 +10,7 @@ require (
 )
 
 require (
-	github.com/Kaese72/riskie-lib v0.0.1
+	github.com/Kaese72/riskie-lib v0.0.2
 	github.com/fsnotify/fsnotify v1.7.0 // indirect
 	github.com/georgysavva/scany/v2 v2.1.0
 	github.com/hashicorp/hcl v1.0.0 // indirect
