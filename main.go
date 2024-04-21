@@ -6,12 +6,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/Kaese72/riskie-lib/logging"
 	"github.com/georgysavva/scany/v2/sqlscan"
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/golang-jwt/jwt/v5"
@@ -74,7 +74,7 @@ func (app application) authMiddleware(next http.Handler) http.Handler {
 		userId, organizationId, err := app.authenticateToken(tokenString)
 		if err != nil {
 			// FIXME should to be able to differentiate between invalid token and expired token
-			log.Print(err.Error())
+			logging.Error(context.Background(), err.Error())
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
@@ -264,14 +264,14 @@ func (app application) login(w http.ResponseWriter, r *http.Request) {
 	if err == nil {
 		userId, organizationId, err := app.authenticateToken(cookie.Value)
 		if err != nil {
-			log.Print(err.Error())
+			logging.Error(r.Context(), err.Error())
 			// Proceeding anyway with other authentication methods
 		} else {
 			// Token is valid, proceed with the user
 			loggedInUser, err = DBReadUser(app.db, organizationId, userId)
 			if err != nil {
 				// We pretty much ignore this issue and proceed with the other authentication methods
-				log.Print(err.Error())
+				logging.Error(r.Context(), err.Error())
 			}
 		}
 	}
@@ -303,7 +303,7 @@ func (app application) login(w http.ResponseWriter, r *http.Request) {
 	// Create JWT token
 	token, err := app.createToken(loggedInUser)
 	if err != nil {
-		log.Print(err.Error())
+		logging.Error(r.Context(), err.Error())
 		APIError(w, "Failed to create JWT token", http.StatusInternalServerError)
 		return
 	}
@@ -319,7 +319,7 @@ func (app application) login(w http.ResponseWriter, r *http.Request) {
 
 	jsonResponse, err := json.MarshalIndent(response, "", "   ")
 	if err != nil {
-		log.Print(err.Error())
+		logging.Error(r.Context(), err.Error())
 		APIError(w, "Failed to marshal JSON response", http.StatusInternalServerError)
 		return
 	}
@@ -348,13 +348,13 @@ func (app application) readUser(w http.ResponseWriter, r *http.Request) {
 	organizationID := r.Context().Value(organizationIDKey).(float64)
 	user, err := DBReadUser(app.db, int(organizationID), userIdInt)
 	if err != nil {
-		log.Print(err.Error())
+		logging.Error(r.Context(), err.Error())
 		APIError(w, "Failed to read user", http.StatusInternalServerError)
 		return
 	}
 	jsonResponse, err := json.MarshalIndent(user, "", "   ")
 	if err != nil {
-		log.Print(err.Error())
+		logging.Error(r.Context(), err.Error())
 		APIError(w, "Failed to marshal JSON response", http.StatusInternalServerError)
 		return
 	}
@@ -366,13 +366,13 @@ func (app application) readUsers(w http.ResponseWriter, r *http.Request) {
 	organizationID := r.Context().Value(organizationIDKey).(float64)
 	users, err := DBReadUsers(app.db, int(organizationID))
 	if err != nil {
-		log.Print(err.Error())
+		logging.Error(r.Context(), err.Error())
 		APIError(w, "Failed to read users", http.StatusInternalServerError)
 		return
 	}
 	jsonResponse, err := json.MarshalIndent(users, "", "   ")
 	if err != nil {
-		log.Print(err.Error())
+		logging.Error(r.Context(), err.Error())
 		APIError(w, "Failed to marshal JSON response", http.StatusInternalServerError)
 		return
 	}
@@ -387,13 +387,13 @@ func (app application) registerOrganization(w http.ResponseWriter, r *http.Reque
 	}{}
 	err := json.NewDecoder(r.Body).Decode(&input)
 	if err != nil {
-		log.Print(err.Error())
+		logging.Error(r.Context(), err.Error())
 		APIError(w, "Failed to parse JSON body", http.StatusBadRequest)
 		return
 	}
 	organization, user, err := DBRegisterOrganization(app.db, input.Username, input.Password)
 	if err != nil {
-		log.Print(err.Error())
+		logging.Error(r.Context(), err.Error())
 		APIError(w, "Failed to register organization", http.StatusInternalServerError)
 		return
 	}
@@ -403,7 +403,7 @@ func (app application) registerOrganization(w http.ResponseWriter, r *http.Reque
 	}{Organization: organization, User: user}
 	jsonResponse, err := json.MarshalIndent(response, "", "   ")
 	if err != nil {
-		log.Print(err.Error())
+		logging.Error(r.Context(), err.Error())
 		APIError(w, "Failed to marshal JSON response", http.StatusInternalServerError)
 		return
 	}
@@ -416,7 +416,7 @@ func (app application) createUser(w http.ResponseWriter, r *http.Request) {
 	inputUser := UserSecret{}
 	err := json.NewDecoder(r.Body).Decode(&inputUser)
 	if err != nil {
-		log.Print(err.Error())
+		logging.Error(r.Context(), err.Error())
 		APIError(w, "Failed to parse JSON body", http.StatusBadRequest)
 		return
 	}
@@ -424,13 +424,13 @@ func (app application) createUser(w http.ResponseWriter, r *http.Request) {
 	inputUser.Organization = int(organizationID)
 	user, err := DBCreateUser(app.db, inputUser)
 	if err != nil {
-		log.Print(err.Error())
+		logging.Error(r.Context(), err.Error())
 		APIError(w, "Failed to create user", http.StatusInternalServerError)
 		return
 	}
 	jsonResponse, err := json.MarshalIndent(user, "", "   ")
 	if err != nil {
-		log.Print(err.Error())
+		logging.Error(r.Context(), err.Error())
 		APIError(w, "Failed to marshal JSON response", http.StatusInternalServerError)
 		return
 	}
@@ -454,7 +454,7 @@ func (app application) updateUser(w http.ResponseWriter, r *http.Request) {
 	inputUser := User{}
 	err = json.NewDecoder(r.Body).Decode(&inputUser)
 	if err != nil {
-		log.Print(err.Error())
+		logging.Error(r.Context(), err.Error())
 		APIError(w, "Failed to parse JSON body", http.StatusBadRequest)
 		return
 	}
@@ -462,13 +462,13 @@ func (app application) updateUser(w http.ResponseWriter, r *http.Request) {
 	inputUser.Organization = int(organizationID)
 	user, err := DBUpdateUser(app.db, inputUser, userIdInt, int(organizationID))
 	if err != nil {
-		log.Print(err.Error())
+		logging.Error(r.Context(), err.Error())
 		APIError(w, "Failed to update user", http.StatusInternalServerError)
 		return
 	}
 	jsonResponse, err := json.MarshalIndent(user, "", "   ")
 	if err != nil {
-		log.Print(err.Error())
+		logging.Error(r.Context(), err.Error())
 		APIError(w, "Failed to marshal JSON response", http.StatusInternalServerError)
 		return
 	}
@@ -517,30 +517,30 @@ func init() {
 
 	err := viper.Unmarshal(&Loaded)
 	if err != nil {
-		log.Fatal(err.Error())
+		logging.Fatal(context.Background(), err.Error())
 	}
 
 	if Loaded.Database.Host == "" {
-		log.Fatal("Database host not set")
+		logging.Fatal(context.Background(), "Database host not set")
 	}
 
 	if Loaded.Database.Password == "" {
-		log.Fatal("Database password not set")
+		logging.Fatal(context.Background(), "Database password not set")
 	}
 
 	if Loaded.Database.User == "" {
-		log.Fatal("Database user not set")
+		logging.Fatal(context.Background(), "Database user not set")
 	}
 
 	if Loaded.JWT.Secret == "" {
-		log.Fatal("JWT secret key not set")
+		logging.Fatal(context.Background(), "JWT secret key not set")
 	}
 }
 
 func main() {
 	db, err := sql.Open("mysql", fmt.Sprintf("%s:%s@tcp(%s:%d)/%s", Loaded.Database.User, Loaded.Database.Password, Loaded.Database.Host, Loaded.Database.Port, Loaded.Database.Database))
 	if err != nil {
-		log.Fatal(err)
+		logging.Fatal(context.Background(), err.Error())
 	}
 	defer db.Close()
 
@@ -561,5 +561,5 @@ func main() {
 	authenticatedRouter.HandleFunc("/users", app.createUser).Methods("POST")
 	authenticatedRouter.HandleFunc("/user/{id:[0-9]+}", app.updateUser).Methods("POST")
 
-	log.Fatal(http.ListenAndServe(fmt.Sprintf("%s:%d", Loaded.Listen.Host, Loaded.Listen.Port), router))
+	logging.Fatal(context.Background(), http.ListenAndServe(fmt.Sprintf("%s:%d", Loaded.Listen.Host, Loaded.Listen.Port), router).Error())
 }

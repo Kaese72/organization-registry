@@ -1,6 +1,6 @@
 module github.com/Kaese72/organization-registry
 
-go 1.22
+go 1.22.0
 
 require (
 	github.com/go-sql-driver/mysql v1.7.1
@@ -10,6 +10,7 @@ require (
 )
 
 require (
+	github.com/Kaese72/riskie-lib v0.0.1
 	github.com/fsnotify/fsnotify v1.7.0 // indirect
 	github.com/georgysavva/scany/v2 v2.1.0
 	github.com/hashicorp/hcl v1.0.0 // indirect
