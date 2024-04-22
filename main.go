@@ -13,10 +13,11 @@ import (
 
 	"github.com/Kaese72/riskie-lib/logging"
 	"github.com/georgysavva/scany/v2/sqlscan"
-	_ "github.com/go-sql-driver/mysql"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/gorilla/mux"
 	"github.com/spf13/viper"
+	"go.elastic.co/apm/module/apmsql"
+	_ "go.elastic.co/apm/module/apmsql/mysql"
 )
 
 type Organization struct {
@@ -74,7 +75,7 @@ func (app application) authMiddleware(next http.Handler) http.Handler {
 		userId, organizationId, err := app.authenticateToken(tokenString)
 		if err != nil {
 			// FIXME should to be able to differentiate between invalid token and expired token
-			logging.Error(context.Background(), err.Error())
+			logging.Error(r.Context(), err.Error())
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
@@ -140,24 +141,24 @@ func (app application) createToken(user User) (string, error) {
 	return tokenString, nil
 }
 
-func DBReadUsers(db *sql.DB, organization int) ([]User, error) {
+func DBReadUsers(ctx context.Context, db *sql.DB, organization int) ([]User, error) {
 	users := []User{}
-	err := sqlscan.Select(context.TODO(), db, &users, `SELECT id,organization,username FROM users where organization = ?`, organization)
+	err := sqlscan.Select(ctx, db, &users, `SELECT id,organization,username FROM users where organization = ?`, organization)
 	return users, err
 }
 
-func DBReadUser(db *sql.DB, organization int, id int) (User, error) {
+func DBReadUser(ctx context.Context, db *sql.DB, organization int, id int) (User, error) {
 	users := []User{}
-	err := sqlscan.Select(context.TODO(), db, &users, `SELECT id,organization,username FROM users WHERE organization = ? AND id = ?`, organization, id)
+	err := sqlscan.Select(ctx, db, &users, `SELECT id,organization,username FROM users WHERE organization = ? AND id = ?`, organization, id)
 	if len(users) == 0 {
 		return User{}, fmt.Errorf("user not found")
 	}
 	return users[0], err
 }
 
-func DBCreateUser(db *sql.DB, user UserSecret) (User, error) {
+func DBCreateUser(ctx context.Context, db *sql.DB, user UserSecret) (User, error) {
 	resUsers := []User{}
-	result, err := db.Query(`INSERT INTO users (organization, username, password) VALUES (?, ?, ?) RETURNING id,organization,username`, user.Organization, user.Username, user.Password)
+	result, err := db.QueryContext(ctx, `INSERT INTO users (organization, username, password) VALUES (?, ?, ?) RETURNING id,organization,username`, user.Organization, user.Username, user.Password)
 	if err != nil {
 		return User{}, err
 	}
@@ -171,7 +172,7 @@ func DBCreateUser(db *sql.DB, user UserSecret) (User, error) {
 	return resUsers[0], err
 }
 
-func DBUpdateUser(db *sql.DB, user User, userId int, organizationId int) (User, error) {
+func DBUpdateUser(ctx context.Context, db *sql.DB, user User, userId int, organizationId int) (User, error) {
 	resUsers := []User{}
 	sqlString := ""
 	arguments := []interface{}{}
@@ -189,7 +190,7 @@ func DBUpdateUser(db *sql.DB, user User, userId int, organizationId int) (User, 
 	sqlString += " WHERE id = ? AND organization = ?"
 	arguments = append(arguments, userId)
 	arguments = append(arguments, organizationId)
-	result, err := db.Query(fmt.Sprintf(`UPDATE users SET %s RETURNING id,organization,username`, sqlString), arguments...)
+	result, err := db.QueryContext(ctx, fmt.Sprintf(`UPDATE users SET %s RETURNING id,organization,username`, sqlString), arguments...)
 	if err != nil {
 		return User{}, err
 	}
@@ -203,14 +204,14 @@ func DBUpdateUser(db *sql.DB, user User, userId int, organizationId int) (User, 
 	return resUsers[0], err
 }
 
-func DBRegisterOrganization(db *sql.DB, username string, password string) (Organization, User, error) {
+func DBRegisterOrganization(ctx context.Context, db *sql.DB, username string, password string) (Organization, User, error) {
 	resOrgs := []Organization{}
 	resUsers := []User{}
-	tx, err := db.BeginTx(context.Background(), nil)
+	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return Organization{}, User{}, err
 	}
-	result, err := tx.Query(`INSERT INTO organizations () VALUES () RETURNING id`)
+	result, err := tx.QueryContext(ctx, `INSERT INTO organizations () VALUES () RETURNING id`)
 	if err != nil {
 		return Organization{}, User{}, err
 	}
@@ -221,7 +222,7 @@ func DBRegisterOrganization(db *sql.DB, username string, password string) (Organ
 	if len(resOrgs) == 0 {
 		return Organization{}, User{}, fmt.Errorf("organization not created")
 	}
-	result, err = tx.Query(`INSERT INTO users (organization, username, password) VALUES (?, ?, ?) RETURNING id, organization,username`, resOrgs[0].ID, username, password)
+	result, err = tx.QueryContext(ctx, `INSERT INTO users (organization, username, password) VALUES (?, ?, ?) RETURNING id, organization,username`, resOrgs[0].ID, username, password)
 	if err != nil {
 		return Organization{}, User{}, err
 	}
@@ -268,7 +269,7 @@ func (app application) login(w http.ResponseWriter, r *http.Request) {
 			// Proceeding anyway with other authentication methods
 		} else {
 			// Token is valid, proceed with the user
-			loggedInUser, err = DBReadUser(app.db, organizationId, userId)
+			loggedInUser, err = DBReadUser(r.Context(), app.db, organizationId, userId)
 			if err != nil {
 				// We pretty much ignore this issue and proceed with the other authentication methods
 				logging.Error(r.Context(), err.Error())
@@ -346,7 +347,7 @@ func (app application) readUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	organizationID := r.Context().Value(organizationIDKey).(float64)
-	user, err := DBReadUser(app.db, int(organizationID), userIdInt)
+	user, err := DBReadUser(r.Context(), app.db, int(organizationID), userIdInt)
 	if err != nil {
 		logging.Error(r.Context(), err.Error())
 		APIError(w, "Failed to read user", http.StatusInternalServerError)
@@ -364,7 +365,7 @@ func (app application) readUser(w http.ResponseWriter, r *http.Request) {
 
 func (app application) readUsers(w http.ResponseWriter, r *http.Request) {
 	organizationID := r.Context().Value(organizationIDKey).(float64)
-	users, err := DBReadUsers(app.db, int(organizationID))
+	users, err := DBReadUsers(r.Context(), app.db, int(organizationID))
 	if err != nil {
 		logging.Error(r.Context(), err.Error())
 		APIError(w, "Failed to read users", http.StatusInternalServerError)
@@ -391,7 +392,7 @@ func (app application) registerOrganization(w http.ResponseWriter, r *http.Reque
 		APIError(w, "Failed to parse JSON body", http.StatusBadRequest)
 		return
 	}
-	organization, user, err := DBRegisterOrganization(app.db, input.Username, input.Password)
+	organization, user, err := DBRegisterOrganization(r.Context(), app.db, input.Username, input.Password)
 	if err != nil {
 		logging.Error(r.Context(), err.Error())
 		APIError(w, "Failed to register organization", http.StatusInternalServerError)
@@ -422,7 +423,7 @@ func (app application) createUser(w http.ResponseWriter, r *http.Request) {
 	}
 	// Always set the organization to the current user's organization
 	inputUser.Organization = int(organizationID)
-	user, err := DBCreateUser(app.db, inputUser)
+	user, err := DBCreateUser(r.Context(), app.db, inputUser)
 	if err != nil {
 		logging.Error(r.Context(), err.Error())
 		APIError(w, "Failed to create user", http.StatusInternalServerError)
@@ -460,7 +461,7 @@ func (app application) updateUser(w http.ResponseWriter, r *http.Request) {
 	}
 	// Always set the organization to the current user's organization
 	inputUser.Organization = int(organizationID)
-	user, err := DBUpdateUser(app.db, inputUser, userIdInt, int(organizationID))
+	user, err := DBUpdateUser(r.Context(), app.db, inputUser, userIdInt, int(organizationID))
 	if err != nil {
 		logging.Error(r.Context(), err.Error())
 		APIError(w, "Failed to update user", http.StatusInternalServerError)
@@ -538,7 +539,7 @@ func init() {
 }
 
 func main() {
-	db, err := sql.Open("mysql", fmt.Sprintf("%s:%s@tcp(%s:%d)/%s", Loaded.Database.User, Loaded.Database.Password, Loaded.Database.Host, Loaded.Database.Port, Loaded.Database.Database))
+	db, err := apmsql.Open("mysql", fmt.Sprintf("%s:%s@tcp(%s:%d)/%s", Loaded.Database.User, Loaded.Database.Password, Loaded.Database.Host, Loaded.Database.Port, Loaded.Database.Database))
 	if err != nil {
 		logging.Fatal(context.Background(), err.Error())
 	}
