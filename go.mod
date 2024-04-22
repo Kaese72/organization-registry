@@ -6,6 +6,7 @@ require (
 	github.com/golang-jwt/jwt/v5 v5.2.0
 	github.com/gorilla/mux v1.8.1
 	github.com/spf13/viper v1.18.2
+	go.elastic.co/apm/module/apmgorilla v1.15.0
 	go.elastic.co/apm/module/apmsql v1.15.0
 )
 
@@ -21,6 +22,7 @@ require (
 	github.com/prometheus/procfs v0.0.0-20190425082905-87a4384529e0 // indirect
 	github.com/santhosh-tekuri/jsonschema v1.2.4 // indirect
 	go.elastic.co/apm v1.15.0 // indirect
+	go.elastic.co/apm/module/apmhttp v1.15.0 // indirect
 	go.elastic.co/fastjson v1.1.0 // indirect
 	golang.org/x/lint v0.0.0-20201208152925-83fdc39ff7b5 // indirect
 	golang.org/x/mod v0.12.0 // indirect

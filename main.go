@@ -16,6 +16,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/gorilla/mux"
 	"github.com/spf13/viper"
+	"go.elastic.co/apm/module/apmgorilla"
 	"go.elastic.co/apm/module/apmsql"
 	_ "go.elastic.co/apm/module/apmsql/mysql"
 )
@@ -548,6 +549,7 @@ func main() {
 	app := application{db: db, jwtSecret: Loaded.JWT.Secret}
 	// organization-registry is the prefix for all routes for this API
 	router := mux.NewRouter().PathPrefix("/organization-registry").Subrouter()
+	apmgorilla.Instrument(router)
 	// Unauthenticated routes
 	unauthenticatedRouter := router.PathPrefix("").Subrouter()
 	unauthenticatedRouter.HandleFunc("/auth/login", app.login).Methods("POST")
