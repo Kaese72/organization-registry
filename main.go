@@ -335,6 +335,16 @@ func (app application) login(w http.ResponseWriter, r *http.Request) {
 	w.Write(jsonResponse)
 }
 
+func (app application) logout(w http.ResponseWriter, r *http.Request) {
+	cookie := &http.Cookie{
+		Name:     "organizationLoginToken",
+		Value:    "",
+		HttpOnly: true,
+		MaxAge:   -1,
+	}
+	http.SetCookie(w, cookie)
+}
+
 func (app application) readUser(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	userID := vars["id"]
@@ -553,6 +563,7 @@ func main() {
 	// Unauthenticated routes
 	unauthenticatedRouter := router.PathPrefix("").Subrouter()
 	unauthenticatedRouter.HandleFunc("/auth/login", app.login).Methods("POST")
+	unauthenticatedRouter.HandleFunc("/auth/logout", app.logout).Methods("POST")
 	unauthenticatedRouter.HandleFunc("/organizations/register", app.registerOrganization).Methods("POST")
 
 	// Authenticated required
