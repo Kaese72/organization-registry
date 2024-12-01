@@ -4,13 +4,13 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/Kaese72/organization-registry/authentication"
 	"github.com/Kaese72/riskie-lib/logging"
 	"github.com/georgysavva/scany/v2/sqlscan"
 	"github.com/golang-jwt/jwt/v5"
@@ -23,67 +23,6 @@ import (
 
 type Organization struct {
 	ID int `json:"id"`
-}
-
-type contextKey string
-
-const (
-	userIDKey         contextKey = "userID"
-	organizationIDKey contextKey = "organizationID"
-)
-
-func (app application) authenticateToken(tokenString string) (int, int, error) {
-	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
-		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-			return nil, fmt.Errorf("unexpected signing method")
-		}
-		return []byte(app.jwtSecret), nil
-	})
-
-	if err != nil {
-		return 0, 0, errors.New("error token")
-	}
-
-	if !token.Valid {
-		return 0, 0, errors.New("invalid token")
-	}
-
-	claims, ok := token.Claims.(jwt.MapClaims)
-	if !ok {
-		return 0, 0, errors.New("invalid claims")
-	}
-
-	userID, ok := claims[string(userIDKey)].(float64)
-	if !ok {
-		return 0, 0, errors.New("invalid user id")
-	}
-	organizationID, ok := claims[string(organizationIDKey)].(float64)
-	if !ok {
-		return 0, 0, errors.New("invalid organization id")
-	}
-	return int(userID), int(organizationID), nil
-}
-
-func (app application) authMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		tokenString := r.Header.Get("Authorization")
-		if tokenString == "" {
-			w.WriteHeader(http.StatusUnauthorized)
-			return
-		}
-
-		tokenString = strings.Replace(tokenString, "Bearer ", "", 1)
-		userId, organizationId, err := app.authenticateToken(tokenString)
-		if err != nil {
-			// FIXME should to be able to differentiate between invalid token and expired token
-			logging.Error(r.Context(), err.Error())
-			w.WriteHeader(http.StatusUnauthorized)
-			return
-		}
-		ctx := context.WithValue(r.Context(), userIDKey, userId)
-		ctx = context.WithValue(ctx, organizationIDKey, organizationId)
-		next.ServeHTTP(w, r.WithContext(ctx))
-	})
 }
 
 type User struct {
@@ -264,13 +203,13 @@ func (app application) login(w http.ResponseWriter, r *http.Request) {
 	cookie, err := r.Cookie("organizationLoginToken")
 	var loggedInUser User
 	if err == nil {
-		userId, organizationId, err := app.authenticateToken(cookie.Value)
+		userId, organizationId, err := authentication.AuthenticateToken(app.jwtSecret, cookie.Value)
 		if err != nil {
 			logging.Error(r.Context(), err.Error())
 			// Proceeding anyway with other authentication methods
 		} else {
 			// Token is valid, proceed with the user
-			loggedInUser, err = DBReadUser(r.Context(), app.db, organizationId, userId)
+			loggedInUser, err = DBReadUser(r.Context(), app.db, int(organizationId), int(userId))
 			if err != nil {
 				// We pretty much ignore this issue and proceed with the other authentication methods
 				logging.Error(r.Context(), err.Error())
@@ -357,7 +296,7 @@ func (app application) readUser(w http.ResponseWriter, r *http.Request) {
 		APIError(w, "userID is not a number", http.StatusBadRequest)
 		return
 	}
-	organizationID := r.Context().Value(organizationIDKey).(float64)
+	organizationID := r.Context().Value(authentication.OrganizationIDKey).(float64)
 	user, err := DBReadUser(r.Context(), app.db, int(organizationID), userIdInt)
 	if err != nil {
 		logging.Error(r.Context(), err.Error())
@@ -375,7 +314,8 @@ func (app application) readUser(w http.ResponseWriter, r *http.Request) {
 }
 
 func (app application) readUsers(w http.ResponseWriter, r *http.Request) {
-	organizationID := r.Context().Value(organizationIDKey).(float64)
+	orgInt := r.Context().Value(authentication.OrganizationIDKey)
+	organizationID := orgInt.(float64)
 	users, err := DBReadUsers(r.Context(), app.db, int(organizationID))
 	if err != nil {
 		logging.Error(r.Context(), err.Error())
@@ -424,7 +364,7 @@ func (app application) registerOrganization(w http.ResponseWriter, r *http.Reque
 }
 
 func (app application) createUser(w http.ResponseWriter, r *http.Request) {
-	organizationID := r.Context().Value(organizationIDKey).(float64)
+	organizationID := r.Context().Value(authentication.OrganizationIDKey).(float64)
 	inputUser := UserSecret{}
 	err := json.NewDecoder(r.Body).Decode(&inputUser)
 	if err != nil {
@@ -451,7 +391,7 @@ func (app application) createUser(w http.ResponseWriter, r *http.Request) {
 }
 
 func (app application) updateUser(w http.ResponseWriter, r *http.Request) {
-	organizationID := r.Context().Value(organizationIDKey).(float64)
+	organizationID := r.Context().Value(authentication.OrganizationIDKey).(float64)
 	vars := mux.Vars(r)
 	userID := vars["id"]
 	if userID == "" {
@@ -568,12 +508,12 @@ func main() {
 
 	// Authenticated required
 	authenticatedRouter := router.NewRoute().Subrouter()
-	authenticatedRouter.Use(app.authMiddleware)
+	authenticatedRouter.Use(authentication.DefaultJWTAuthentication(Loaded.JWT.Secret))
 	// authenticatedRouter.HandleFunc("/users/changemypw", app.changeMyPassword).Methods("POST")
-	authenticatedRouter.HandleFunc("/users/{id:[0-9]+}", app.readUser).Methods("GET")
 	authenticatedRouter.HandleFunc("/users", app.readUsers).Methods("GET")
+	authenticatedRouter.HandleFunc("/users/{id:[0-9]+}", app.readUser).Methods("GET")
 	authenticatedRouter.HandleFunc("/users", app.createUser).Methods("POST")
-	authenticatedRouter.HandleFunc("/user/{id:[0-9]+}", app.updateUser).Methods("POST")
+	authenticatedRouter.HandleFunc("/users/{id:[0-9]+}", app.updateUser).Methods("POST")
 
 	logging.Fatal(context.Background(), http.ListenAndServe(fmt.Sprintf("%s:%d", Loaded.Listen.Host, Loaded.Listen.Port), router).Error())
 }
